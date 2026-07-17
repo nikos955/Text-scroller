@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>TXT Auto Scroller</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* -------- Toolbar -------- */
+        #toolbar {
+            background: #16213e;
+            padding: 12px 16px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid #0f3460;
+            flex-shrink: 0;
+            z-index: 10;
+        }
+
+        #toolbar label {
+            font-size: 14px;
+            color: #aaa;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .btn {
+            background: #0f3460;
+            border: none;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            background: #1a4a7a;
+        }
+
+        .btn.active {
+            background: #e94560;
+        }
+
+        .btn.active:hover {
+            background: #c73a54;
+        }
+
+        #speedControl {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        #speedControl input[type="range"] {
+            width: 100px;
+            accent-color: #e94560;
+            background: #0f3460;
+            height: 4px;
+            border-radius: 2px;
+        }
+
+        #speedLabel {
+            font-size: 14px;
+            color: #aaa;
+            min-width: 36px;
+            text-align: center;
+        }
+
+        /* -------- Text Display -------- */
+        #textContainer {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            background: #1a1a2e;
+            padding: 20px 16px;
+        }
+
+        #textContent {
+            font-size: 18px;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            padding: 4px 0;
+            transition: transform 0.05s linear;
+            /* Smooth movement controlled by JS */;
+        }
+
+        /* -------- Status Bar -------- */
+        #status {
+            background: #16213e;
+            padding: 8px 16px;
+            font-size: 13px;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+
+        #status span {
+            color: #aaa;
+        }
+
+        /* -------- Responsive -------- */
+        @media (max-width: 480px) {
+            #toolbar {
+                padding: 8px 12px;
+                gap: 6px;
+            }
+            .btn {
+                padding: 6px 12px;
+                font-size: 13px;
+            }
+            #textContent {
+                font-size: 16px;
+                line-height: 1.7;
+            }
+            #speedControl input[type="range"] {
+                width: 70px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ====== TOOLBAR ====== -->
+    <div id="toolbar">
+        <label for="fileInput">
+            📂 Choose .txt
+            <input type="file" id="fileInput" accept=".txt">
+        </label>
+
+        <button class="btn" id="playBtn">▶ Play</button>
+        <button class="btn" id="resetBtn">⟳ Reset</button>
+
+        <div id="speedControl">
+            <span style="font-size:14px; color:#888;">🐢</span>
+            <input type="range" id="speedSlider" min="1" max="10" value="4">
+            <span style="font-size:14px; color:#888;">🐇</span>
+            <span id="speedLabel">4</span>
+        </div>
+    </div>
+
+    <!-- ====== TEXT DISPLAY ====== -->
+    <div id="textContainer">
+        <div id="textContent">
+            <!-- File content goes here -->
+            <p style="color:#666; text-align:center; margin-top:40%;">
+                📄 Load a .txt file to start.<br>
+                Tap "▶ Play" to auto-scroll.
+            </p>
+        </div>
+    </div>
+
+    <!-- ====== STATUS BAR ====== -->
+    <div id="status">
+        <span id="fileName">No file loaded</span>
+        <span id="position">Line: 0 / 0</span>
+    </div>
+
+    <script>
+        // ============================================================
+        //  DOM References
+        // ============================================================
+        const fileInput = document.getElementById('fileInput');
+        const textContent = document.getElementById('textContent');
+        const playBtn = document.getElementById('playBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const speedSlider = document.getElementById('speedSlider');
+        const speedLabel = document.getElementById('speedLabel');
+        const fileNameSpan = document.getElementById('fileName');
+        const positionSpan = document.getElementById('position');
+
+        // ============================================================
+        //  State
+        // ============================================================
+        let isPlaying = false;
+        let animationId = null;      // requestAnimationFrame ID
+        let scrollOffset = 0;        // current transform offset in pixels
+        let containerHeight = 0;
+        let contentHeight = 0;
+        let maxScroll = 0;
+        let speedPixelsPerFrame = 0.3; // base speed
+
+        // ============================================================
+        //  Speed mapping (slider 1-10 → pixels per frame)
+        //  LOWERED RANGE: 0.05 (very slow) to 0.8 (moderate)
+        // ============================================================
+        function updateSpeed() {
+            const val = parseInt(speedSlider.value, 10);
+            speedLabel.textContent = val;
+            // Range: 0.05 (slow) up to 0.8 (fast) pixels per frame (60fps)
+            speedPixelsPerFrame = 0.05 + (val / 10) * 0.75;
+        }
+        speedSlider.addEventListener('input', updateSpeed);
+        updateSpeed();
+
+        // ============================================================
+        //  Read file
+        // ============================================================
+        fileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // Reset playback
+            if (isPlaying) togglePlay();
+
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                const content = ev.target.result;
+                textContent.textContent = content;
+                fileNameSpan.textContent = file.name;
+
+                // Reset scroll position
+                scrollOffset = 0;
+                textContent.style.transform = 'translateY(0px)';
+
+                // Update stats after layout
+                requestAnimationFrame(() => {
+                    updateDimensions();
+                    updatePositionDisplay();
+                });
+            };
+            reader.readAsText(file, 'UTF-8');
+        });
+
+        // ============================================================
+        //  Update dimensions
+        // ============================================================
+        function updateDimensions() {
+            const container = document.getElementById('textContainer');
+            containerHeight = container.clientHeight;
+            contentHeight = textContent.scrollHeight;
+            maxScroll = Math.max(0, contentHeight - containerHeight);
+            // If content fits, disable scrolling
+            if (maxScroll <= 0) {
+                if (isPlaying) togglePlay();
+            }
+        }
+
+        // ============================================================
+        //  Position display
+        // ============================================================
+        function updatePositionDisplay() {
+            if (contentHeight === 0) {
+                positionSpan.textContent = 'Line: 0 / 0';
+                return;
+            }
+            const lineHeight = parseFloat(getComputedStyle(textContent).lineHeight) || 28;
+            const visibleLines = Math.floor(containerHeight / lineHeight);
+            const totalLines = Math.floor(contentHeight / lineHeight);
+            const currentLine = Math.floor(scrollOffset / lineHeight);
+            positionSpan.textContent = `Line: ${currentLine + 1} / ${totalLines}`;
+        }
+
+        // ============================================================
+        //  Scroll step (called by requestAnimationFrame)
+        // ============================================================
+        function scrollStep(timestamp) {
+            if (!isPlaying) return;
+
+            // Add speed
+            scrollOffset += speedPixelsPerFrame;
+
+            // Clamp
+            if (scrollOffset >= maxScroll) {
+                scrollOffset = maxScroll;
+                textContent.style.transform = `translateY(-${scrollOffset}px)`;
+                togglePlay(); // auto-stop at end
+                updatePositionDisplay();
+                return;
+            }
+
+            textContent.style.transform = `translateY(-${scrollOffset}px)`;
+            updatePositionDisplay();
+
+            // Continue
+            animationId = requestAnimationFrame(scrollStep);
+        }
+
+        // ============================================================
+        //  Play / Pause
+        // ============================================================
+        function togglePlay() {
+            if (isPlaying) {
+                // Pause
+                isPlaying = false;
+                if (animationId) {
+                    cancelAnimationFrame(animationId);
+                    animationId = null;
+                }
+                playBtn.textContent = '▶ Play';
+                playBtn.classList.remove('active');
+            } else {
+                // Check if we're at the end
+                if (maxScroll <= 0) {
+                    // No content or content fits
+                    return;
+                }
+                if (scrollOffset >= maxScroll) {
+                    // Reset to top if at end
+                    scrollOffset = 0;
+                    textContent.style.transform = 'translateY(0px)';
+                    updatePositionDisplay();
+                }
+                isPlaying = true;
+                playBtn.textContent = '⏸ Pause';
+                playBtn.classList.add('active');
+                animationId = requestAnimationFrame(scrollStep);
+            }
+        }
+
+        playBtn.addEventListener('click', togglePlay);
+
+        // ============================================================
+        //  Reset scroll to top
+        // ============================================================
+        resetBtn.addEventListener('click', function() {
+            if (isPlaying) togglePlay();
+            scrollOffset = 0;
+            textContent.style.transform = 'translateY(0px)';
+            updateDimensions();
+            updatePositionDisplay();
+        });
+
+        // ============================================================
+        //  Handle window resize / orientation change
+        // ============================================================
+        let resizeTimeout;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                updateDimensions();
+                // Clamp scroll offset
+                if (scrollOffset > maxScroll) {
+                    scrollOffset = maxScroll;
+                    textContent.style.transform = `translateY(-${scrollOffset}px)`;
+                }
+                updatePositionDisplay();
+            }, 200);
+        });
+
+        // Also update when keyboard opens/closes on mobile
+        window.addEventListener('visualViewport', () => {
+            setTimeout(() => {
+                updateDimensions();
+                if (scrollOffset > maxScroll) {
+                    scrollOffset = maxScroll;
+                    textContent.style.transform = `translateY(-${scrollOffset}px)`;
+                }
+                updatePositionDisplay();
+            }, 300);
+        });
+
+        // ============================================================
+        //  Touch to pause (tap on text)
+        // ============================================================
+        document.getElementById('textContainer').addEventListener('click', function() {
+            if (textContent.textContent && textContent.textContent.includes('Load a .txt')) return;
+            if (maxScroll > 0) {
+                togglePlay();
+            }
+        });
+
+        // ============================================================
+        //  Initial dimensions after load
+        // ============================================================
+        setTimeout(updateDimensions, 100);
+    </script>
+
+</body>
+</html>
