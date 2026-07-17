@@ -18,9 +18,9 @@
             height: 100vh;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
 
-        /* -------- Toolbar -------- */
         #toolbar {
             background: #16213e;
             padding: 12px 16px;
@@ -91,13 +91,13 @@
             text-align: center;
         }
 
-        /* -------- Text Display -------- */
         #textContainer {
             flex: 1;
             overflow: hidden;
             position: relative;
             background: #1a1a2e;
             padding: 20px 16px;
+            touch-action: none;
         }
 
         #textContent {
@@ -106,11 +106,11 @@
             white-space: pre-wrap;
             word-wrap: break-word;
             padding: 4px 0;
-            transition: transform 0.05s linear;
-            /* Smooth movement controlled by JS */;
+            will-change: transform;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
-        /* -------- Status Bar -------- */
         #status {
             background: #16213e;
             padding: 8px 16px;
@@ -126,7 +126,6 @@
             color: #aaa;
         }
 
-        /* -------- Responsive -------- */
         @media (max-width: 480px) {
             #toolbar {
                 padding: 8px 12px;
@@ -148,7 +147,6 @@
 </head>
 <body>
 
-    <!-- ====== TOOLBAR ====== -->
     <div id="toolbar">
         <label for="fileInput">
             📂 Choose .txt
@@ -166,18 +164,16 @@
         </div>
     </div>
 
-    <!-- ====== TEXT DISPLAY ====== -->
     <div id="textContainer">
         <div id="textContent">
-            <!-- File content goes here -->
             <p style="color:#666; text-align:center; margin-top:40%;">
                 📄 Load a .txt file to start.<br>
-                Tap "▶ Play" to auto-scroll.
+                Tap "▶ Play" to auto-scroll.<br>
+                👆 Drag up/down to scroll manually
             </p>
         </div>
     </div>
 
-    <!-- ====== STATUS BAR ====== -->
     <div id="status">
         <span id="fileName">No file loaded</span>
         <span id="position">Line: 0 / 0</span>
@@ -187,7 +183,7 @@
         // ============================================================
         //  DOM References
         // ============================================================
-        const fileInput = document.getElementById('fileInput');
+        const container = document.getElementById('textContainer');
         const textContent = document.getElementById('textContent');
         const playBtn = document.getElementById('playBtn');
         const resetBtn = document.getElementById('resetBtn');
@@ -200,22 +196,30 @@
         //  State
         // ============================================================
         let isPlaying = false;
-        let animationId = null;      // requestAnimationFrame ID
-        let scrollOffset = 0;        // current transform offset in pixels
+        let animationId = null;
+        let scrollOffset = 0;
         let containerHeight = 0;
         let contentHeight = 0;
         let maxScroll = 0;
-        let speedPixelsPerFrame = 0.3; // base speed
+        let speedPixelsPerFrame = 0.12;
+
+        // Manual scroll state
+        let isDragging = false;
+        let startY = 0;
+        let startOffset = 0;
+        let lastDragY = 0;
+        let lastDragTime = 0;
+        let dragVelocity = 0;
+        let momentumId = null;
+        let momentumActive = false;
 
         // ============================================================
-        //  Speed mapping (slider 1-10 → pixels per frame)
-        //  LOWERED RANGE: 0.05 (very slow) to 0.8 (moderate)
+        //  Speed mapping - EVEN LOWER RANGE: 0.02 to 0.35 px/frame
         // ============================================================
         function updateSpeed() {
             const val = parseInt(speedSlider.value, 10);
             speedLabel.textContent = val;
-            // Range: 0.05 (slow) up to 0.8 (fast) pixels per frame (60fps)
-            speedPixelsPerFrame = 0.05 + (val / 10) * 0.75;
+            speedPixelsPerFrame = 0.02 + (val / 10) * 0.33;
         }
         speedSlider.addEventListener('input', updateSpeed);
         updateSpeed();
@@ -227,20 +231,16 @@
             const file = e.target.files[0];
             if (!file) return;
 
-            // Reset playback
             if (isPlaying) togglePlay();
+            stopMomentum();
 
             const reader = new FileReader();
             reader.onload = function(ev) {
-                const content = ev.target.result;
-                textContent.textContent = content;
+                textContent.textContent = ev.target.result;
                 fileNameSpan.textContent = file.name;
-
-                // Reset scroll position
                 scrollOffset = 0;
                 textContent.style.transform = 'translateY(0px)';
-
-                // Update stats after layout
+                // Force layout then update
                 requestAnimationFrame(() => {
                     updateDimensions();
                     updatePositionDisplay();
@@ -250,65 +250,89 @@
         });
 
         // ============================================================
-        //  Update dimensions
+        //  Update dimensions - FIXED: accounts for container padding
         // ============================================================
         function updateDimensions() {
-            const container = document.getElementById('textContainer');
-            containerHeight = container.clientHeight;
+            const containerStyle = getComputedStyle(container);
+            const paddingTop = parseFloat(containerStyle.paddingTop) || 0;
+            const paddingBottom = parseFloat(containerStyle.paddingBottom) || 0;
+            
+            // Available height = container height minus padding
+            const availableHeight = container.clientHeight - paddingTop - paddingBottom;
+            
+            // Content height is the actual scroll height
             contentHeight = textContent.scrollHeight;
-            maxScroll = Math.max(0, contentHeight - containerHeight);
-            // If content fits, disable scrolling
-            if (maxScroll <= 0) {
-                if (isPlaying) togglePlay();
+            
+            // Max scroll = content height minus what fits in the viewport
+            // This ensures the LAST line of content can reach the BOTTOM of the visible area
+            maxScroll = Math.max(0, contentHeight - availableHeight);
+            
+            if (maxScroll <= 0 && isPlaying) togglePlay();
+            
+            // Clamp current scroll position
+            if (scrollOffset > maxScroll) {
+                applyScroll(maxScroll);
             }
         }
 
         // ============================================================
-        //  Position display
+        //  Position display - FIXED: more accurate line counting
         // ============================================================
         function updatePositionDisplay() {
-            if (contentHeight === 0) {
+            if (contentHeight === 0 || maxScroll === 0) {
                 positionSpan.textContent = 'Line: 0 / 0';
                 return;
             }
-            const lineHeight = parseFloat(getComputedStyle(textContent).lineHeight) || 28;
-            const visibleLines = Math.floor(containerHeight / lineHeight);
+            
+            // Calculate approximate line height from content
+            const tempDiv = document.createElement('div');
+            tempDiv.style.cssText = 'position:absolute;visibility:hidden;font-size:18px;line-height:1.8;white-space:pre-wrap;';
+            tempDiv.textContent = 'Test';
+            document.body.appendChild(tempDiv);
+            const lineHeight = tempDiv.offsetHeight || 28;
+            document.body.removeChild(tempDiv);
+            
             const totalLines = Math.floor(contentHeight / lineHeight);
             const currentLine = Math.floor(scrollOffset / lineHeight);
-            positionSpan.textContent = `Line: ${currentLine + 1} / ${totalLines}`;
+            positionSpan.textContent = `Line: ${Math.min(currentLine + 1, totalLines)} / ${totalLines}`;
         }
 
         // ============================================================
-        //  Scroll step (called by requestAnimationFrame)
+        //  Apply scroll offset - HARD CLAMP (no bounce)
+        // ============================================================
+        function applyScroll(offset) {
+            // Strict clamping - NO OVERSCROLL ALLOWED
+            if (offset < 0) offset = 0;
+            if (offset > maxScroll) offset = maxScroll;
+            
+            scrollOffset = offset;
+            textContent.style.transform = `translateY(-${scrollOffset}px)`;
+            updatePositionDisplay();
+        }
+
+        // ============================================================
+        //  Auto-scroll loop - STARTS FROM CURRENT POSITION
         // ============================================================
         function scrollStep(timestamp) {
             if (!isPlaying) return;
 
-            // Add speed
-            scrollOffset += speedPixelsPerFrame;
+            let newOffset = scrollOffset + speedPixelsPerFrame;
 
-            // Clamp
-            if (scrollOffset >= maxScroll) {
-                scrollOffset = maxScroll;
-                textContent.style.transform = `translateY(-${scrollOffset}px)`;
-                togglePlay(); // auto-stop at end
-                updatePositionDisplay();
+            if (newOffset >= maxScroll) {
+                applyScroll(maxScroll);
+                togglePlay();
                 return;
             }
 
-            textContent.style.transform = `translateY(-${scrollOffset}px)`;
-            updatePositionDisplay();
-
-            // Continue
+            applyScroll(newOffset);
             animationId = requestAnimationFrame(scrollStep);
         }
 
         // ============================================================
-        //  Play / Pause
+        //  Play / Pause - DOES NOT RESET TO TOP
         // ============================================================
         function togglePlay() {
             if (isPlaying) {
-                // Pause
                 isPlaying = false;
                 if (animationId) {
                     cancelAnimationFrame(animationId);
@@ -317,17 +341,8 @@
                 playBtn.textContent = '▶ Play';
                 playBtn.classList.remove('active');
             } else {
-                // Check if we're at the end
-                if (maxScroll <= 0) {
-                    // No content or content fits
-                    return;
-                }
-                if (scrollOffset >= maxScroll) {
-                    // Reset to top if at end
-                    scrollOffset = 0;
-                    textContent.style.transform = 'translateY(0px)';
-                    updatePositionDisplay();
-                }
+                if (maxScroll <= 0) return;
+                // If at the bottom, stay at bottom
                 isPlaying = true;
                 playBtn.textContent = '⏸ Pause';
                 playBtn.classList.add('active');
@@ -338,49 +353,189 @@
         playBtn.addEventListener('click', togglePlay);
 
         // ============================================================
-        //  Reset scroll to top
+        //  Reset - ONLY WAY TO GO BACK TO TOP
         // ============================================================
         resetBtn.addEventListener('click', function() {
             if (isPlaying) togglePlay();
-            scrollOffset = 0;
-            textContent.style.transform = 'translateY(0px)';
+            stopMomentum();
+            applyScroll(0);
             updateDimensions();
-            updatePositionDisplay();
         });
 
         // ============================================================
-        //  Handle window resize / orientation change
+        //  Stop momentum
+        // ============================================================
+        function stopMomentum() {
+            if (momentumId) {
+                cancelAnimationFrame(momentumId);
+                momentumId = null;
+            }
+            momentumActive = false;
+        }
+
+        // ============================================================
+        //  MANUAL SCROLL - Touch Events
+        // ============================================================
+        container.addEventListener('touchstart', function(e) {
+            if (isPlaying) togglePlay();
+            stopMomentum();
+
+            const touch = e.touches[0];
+            isDragging = true;
+            startY = touch.clientY;
+            startOffset = scrollOffset;
+            lastDragY = touch.clientY;
+            lastDragTime = Date.now();
+            dragVelocity = 0;
+        }, { passive: true });
+
+        container.addEventListener('touchmove', function(e) {
+            if (!isDragging) return;
+            const touch = e.touches[0];
+            const deltaY = startY - touch.clientY;
+            let newOffset = startOffset + deltaY;
+
+            // Track velocity
+            const now = Date.now();
+            const dt = now - lastDragTime;
+            if (dt > 0) {
+                dragVelocity = (lastDragY - touch.clientY) / dt;
+            }
+            lastDragY = touch.clientY;
+            lastDragTime = now;
+
+            applyScroll(newOffset);
+        }, { passive: true });
+
+        container.addEventListener('touchend', function(e) {
+            if (!isDragging) return;
+            isDragging = false;
+
+            // Only start momentum if velocity is significant and not at boundaries
+            if (Math.abs(dragVelocity) > 0.3) {
+                // Check if we're already at a boundary
+                if ((scrollOffset <= 0 && dragVelocity < 0) || 
+                    (scrollOffset >= maxScroll && dragVelocity > 0)) {
+                    return;
+                }
+                startMomentum(dragVelocity);
+            }
+        }, { passive: true });
+
+        container.addEventListener('touchcancel', function() {
+            isDragging = false;
+            stopMomentum();
+        }, { passive: true });
+
+        // ============================================================
+        //  MANUAL SCROLL - Mouse Events
+        // ============================================================
+        let mouseDown = false;
+        let mouseStartY = 0;
+        let mouseStartOffset = 0;
+
+        container.addEventListener('mousedown', function(e) {
+            if (isPlaying) togglePlay();
+            stopMomentum();
+
+            mouseDown = true;
+            mouseStartY = e.clientY;
+            mouseStartOffset = scrollOffset;
+            container.style.cursor = 'grabbing';
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!mouseDown) return;
+            const deltaY = mouseStartY - e.clientY;
+            applyScroll(mouseStartOffset + deltaY);
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (mouseDown) {
+                mouseDown = false;
+                container.style.cursor = 'default';
+            }
+        });
+
+        // ============================================================
+        //  Momentum scrolling - NO BOUNCE, HARD STOPS
+        // ============================================================
+        function startMomentum(velocity) {
+            stopMomentum();
+            
+            let currentVelocity = velocity * 180;
+            const friction = 0.975;
+            momentumActive = true;
+
+            function step() {
+                if (!momentumActive) return;
+                
+                // Stop if very slow
+                if (Math.abs(currentVelocity) < 0.05) {
+                    momentumActive = false;
+                    momentumId = null;
+                    return;
+                }
+
+                let newOffset = scrollOffset + currentVelocity;
+
+                // HARD STOP at boundaries - NO BOUNCE
+                if (newOffset < 0) {
+                    applyScroll(0);
+                    momentumActive = false;
+                    momentumId = null;
+                    return;
+                }
+                
+                if (newOffset > maxScroll) {
+                    applyScroll(maxScroll);
+                    momentumActive = false;
+                    momentumId = null;
+                    return;
+                }
+
+                applyScroll(newOffset);
+                currentVelocity *= friction;
+
+                // Stop if velocity is negligible
+                if (Math.abs(currentVelocity) < 0.05) {
+                    momentumActive = false;
+                    momentumId = null;
+                    return;
+                }
+
+                momentumId = requestAnimationFrame(step);
+            }
+
+            momentumId = requestAnimationFrame(step);
+        }
+
+        // ============================================================
+        //  Handle window resize
         // ============================================================
         let resizeTimeout;
         window.addEventListener('resize', function() {
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(() => {
                 updateDimensions();
-                // Clamp scroll offset
-                if (scrollOffset > maxScroll) {
-                    scrollOffset = maxScroll;
-                    textContent.style.transform = `translateY(-${scrollOffset}px)`;
-                }
+                if (scrollOffset > maxScroll) applyScroll(maxScroll);
                 updatePositionDisplay();
             }, 200);
         });
 
-        // Also update when keyboard opens/closes on mobile
         window.addEventListener('visualViewport', () => {
             setTimeout(() => {
                 updateDimensions();
-                if (scrollOffset > maxScroll) {
-                    scrollOffset = maxScroll;
-                    textContent.style.transform = `translateY(-${scrollOffset}px)`;
-                }
+                if (scrollOffset > maxScroll) applyScroll(maxScroll);
                 updatePositionDisplay();
             }, 300);
         });
 
         // ============================================================
-        //  Touch to pause (tap on text)
+        //  Tap on text = toggle play
         // ============================================================
-        document.getElementById('textContainer').addEventListener('click', function() {
+        container.addEventListener('click', function(e) {
+            if (isDragging || mouseDown) return;
             if (textContent.textContent && textContent.textContent.includes('Load a .txt')) return;
             if (maxScroll > 0) {
                 togglePlay();
@@ -388,7 +543,7 @@
         });
 
         // ============================================================
-        //  Initial dimensions after load
+        //  Init
         // ============================================================
         setTimeout(updateDimensions, 100);
     </script>
